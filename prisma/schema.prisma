@@ -1,0 +1,30 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Em SQLite não há enums nativos, então usamos Strings no model
+// Status possíveis: SCRAPED, AI_EVALUATED, APPLIED, FAILED
+
+model JobApplication {
+  id          String   @id @default(uuid())
+  jobId       String   @unique // The unique ID from the platform (e.g. LinkedIn job ID)
+  platform    String   // e.g. "LinkedIn", "Glassdoor", "Sapo"
+  title       String
+  company     String?
+  location    String?
+  description     String? 
+  aiSummary       String?
+  matchScore      Int?     // Nota de 0 a 100 da IA
+  relevanceReason String?  // Explicação por que a IA sugeriu
+  feedback        String?  // INTERVIEW, REJECTED, IGNORED
+  status          String   @default("SCRAPED")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([jobId, platform])
+}

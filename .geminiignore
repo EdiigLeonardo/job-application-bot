@@ -1,0 +1,48 @@
+--- PESADOS & DESNECESSÁRIOS --
+node_modules/
+.next/
+dist/
+build/
+out/
+.cache/
+.vercel/
+
+-- ASSETS (O Gemini não precisa ler o código binário disso) --
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.mp4
+*.webm
+*.pdf
+*.zip
+*.tar.gz
+
+-- LOGS & DIAGNÓSTICOS --
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+coverage/
+.clinic/
+
+-- DADOS SENSÍVEIS (Segurança e Economia) --
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+certs/
+
+-- CONFIGURAÇÕES DE IDE E SO --
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+-- SQL & DUMP (Evite subir bancos de dados inteiros para o contexto) --
+*.sql
+supabase/.temp/

@@ -1,0 +1,6 @@
+   - "Nome" input: EDIG Leonardo
+   - "Email" input: ediigmelchiior@gmail.com
+   - "Contacto telefónico" input: +351960211775
+   - "CV" file input: /assets/cv.pdf
+   - "Termos" checkbox: checked
+   - "ENVIAR CANDIDATURA" button: True
