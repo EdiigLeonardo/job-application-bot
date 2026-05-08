@@ -20,6 +20,12 @@ export class SapoAdapter implements JobBoardAdapter {
    * ENTRY_POINT: Decide entre Navegação Inicial (1.1) ou Processamento Direto (1.2).
    */
   async entryPoint(page: Page, keyword: string, job?: Job) {
+    // Anti-Ads (SPEC 2)
+    await this.setupAntiAds(page);
+
+    // 0. Autenticação (Novo Passo SPEC)
+    await this.ensureAuthenticated(page, job);
+
     const url = page.url();
     // Se a URL já contém os parâmetros de pesquisa, assume que estamos em 1.2
     if (url.includes('pesquisa=') && (url.includes('local=') || url.includes('search-results'))) {
@@ -121,19 +127,29 @@ export class SapoAdapter implements JobBoardAdapter {
       await applyButton.click({ force: true });
     }
 
+    // Verificação de Domínio (SPEC 4)
+    try {
+      await page.waitForSelector('.main-content, #content, body', { timeout: 5000 });
+      if (!page.url().includes('sapo.pt')) throw new Error('Fora do domínio SAPO');
+    } catch (e) {
+      console.warn('[Sapo] Estado "Perdido" detectado. Resetando para URL primária.');
+      await page.goto('https://emprego.sapo.pt/');
+      return false; 
+    }
+
     // Aguardar o formulário aparecer (basta o seletor crítico)
-    await page.waitForSelector('#nome, input[name*="nome"]', { timeout: 5000 })
-      .catch(() => console.log('[Sapo] Aviso: Formulário não detetado imediatamente, tentando prosseguir...'));
+    await page.waitForSelector('#nome, input[name*="nome"]', { timeout: 10000 })
+      .catch(() => console.log('[Sapo] Aviso: Formulário não detetado imediatamente.'));
 
     // Extrair metadados para persistência
     const title = await page.locator('h1').first().innerText().catch(() => 'Vaga Sapo');
     const company = await page.locator('.company-name').first().innerText().catch(() => 'Empresa Sapo');
 
     try {
-      // 1. UPLOAD CV (SPEC 1)
-      const uploadSuccess = await this.uploadCV(page, job);
-      if (!uploadSuccess) {
-        await this.logFailure(page, title, company, 'Upload_Error');
+      // 1. SELEÇÃO DE CV (SPEC 1.3.4 - NOVO)
+      const selectionSuccess = await this.selectCVFromDropdown(page, job);
+      if (!selectionSuccess) {
+        await this.logFailure(page, title, company, 'CV_Selection_Error');
         return false;
       }
 
@@ -185,39 +201,88 @@ export class SapoAdapter implements JobBoardAdapter {
   }
 
   /**
-   * SPEC 1: Upload de CV com Verificação
+   * SPEC 0: Autenticação Persistente
    */
-  private async uploadCV(page: Page, job?: Job): Promise<boolean> {
-    const cvPath = path.resolve(process.env.CV_PATH || 'assets/cv.pdf');
-    console.log(`[Sapo][Upload] Iniciando upload: ${cvPath}`);
-    if (job) await job.log(`Iniciando upload de CV: ${path.basename(cvPath)}`);
-
-    try {
-      const fileInput = page.locator('input[type="file"]');
-      
-      // Detetar botão e disparar fileChooser se necessário
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null),
-        page.click('button:has-text("Escolher"), .ink-button:has-text("Escolher"), text=/Adicionar CV/i', { timeout: 3000 }).catch(() => {})
-      ]);
-
-      if (fileChooser) {
-        await fileChooser.setFiles(cvPath);
-      } else {
-        await fileInput.setInputFiles(cvPath);
-      }
-
-      // Verificação de Upload (Aguardar indicador visual)
-      // No SAPO, geralmente aparece o nome do ficheiro ou um checkmark
-      await page.waitForSelector('text=/Carregado|Sucesso|cv.pdf/i', { timeout: 15000 })
-        .catch(() => console.log('[Sapo][Upload] Aviso: Confirmação visual de upload não detectada.'));
-
-      if (job) await job.updateProgress(25);
-      return true;
-    } catch (error) {
-      console.error('[Sapo][Upload] Erro fatal no upload:', error);
-      return false;
+  async ensureAuthenticated(page: Page, job?: Job) {
+    console.log('[Sapo][Auth] Verificando sessão...');
+    await page.goto('https://emprego.sapo.pt/', { waitUntil: 'domcontentloaded' });
+    
+    const isLogged = await page.locator('a:has-text("Sair"), .user-profile').count() > 0;
+    if (isLogged) {
+      console.log('[Sapo][Auth] Sessão ativa.');
+      return;
     }
+
+    console.log('[Sapo][Auth] Iniciando login...');
+    if (job) await job.log('Autenticando no SAPO...');
+
+    await page.goto('https://login.sapo.pt/LoginWithToken.do?to=https%3A%2F%2Femprego.sapo.pt%2F', { waitUntil: 'networkidle' });
+
+    await page.fill('input#username, input[name="username"], input[type="email"]', process.env.SAPO_AUTH_EMAIL || '');
+    await page.click('button:has-text("Continuar"), #submit-btn');
+    
+    await page.fill('input#password, input[name="password"], input[type="password"]', process.env.SAPO_AUTH_PASSWORD || '');
+    await page.click('button:has-text("Continuar"), #submit-btn');
+
+    await page.waitForLoadState('networkidle');
+    
+    const success = await page.locator('a:has-text("Sair"), .user-profile').count() > 0;
+    if (!success) {
+      throw new Error('Falha na autenticação SAPO. Verifique as credenciais no .env.');
+    }
+  }
+
+  /**
+   * SPEC 2: Anti-Ads Global Handler
+   */
+  async setupAntiAds(page: Page) {
+    const closeSelectors = [
+      'button:has-text("Fechar")',
+      'button:has-text("FECHAR")',
+      'button:has-text("x")',
+      '.ink-button.close-highimpact',
+      '#qc-cmp2-ui button[mode="primary"]', // Cookies como popup
+      '#fechar-x'
+    ];
+
+    for (const selector of closeSelectors) {
+      await page.addLocatorHandler(page.locator(selector).first(), async () => {
+        console.log(`[Sapo][Anti-Ads] Fechando popup detectado: ${selector}`);
+        await page.locator(selector).first().click().catch(() => {});
+      });
+    }
+  }
+
+  /**
+   * SPEC 1.3.4: Seleção de CV via Dropdown (Estabilidade e Retry)
+   */
+  private async selectCVFromDropdown(page: Page, job?: Job): Promise<boolean> {
+    const cvName = 'edig_it_2026';
+    console.log(`[Sapo][CV] Selecionando CV: ${cvName}`);
+    
+    // Tentar 2 vezes com timeout de 10s (SPEC 2)
+    for (let i = 0; i < 2; i++) {
+      try {
+        const dropdown = page.locator('select[name*="cv"], select[id*="cv"], .cv-dropdown').first();
+        
+        // Aguardar estabilidade (SPEC 3)
+        await dropdown.waitFor({ state: 'visible', timeout: 10000 });
+        await dropdown.scrollIntoViewIfNeeded();
+
+        // Selecionar por texto ou valor
+        await dropdown.selectOption({ label: cvName }).catch(async () => {
+          await dropdown.selectOption({ value: cvName });
+        });
+
+        if (job) await job.updateProgress(25);
+        return true;
+      } catch (error) {
+        console.warn(`[Sapo][CV] Tentativa ${i + 1} falhou. Retrying...`);
+        if (i === 1) return false;
+        await page.waitForTimeout(2000);
+      }
+    }
+    return false;
   }
 
   /**
@@ -247,8 +312,8 @@ export class SapoAdapter implements JobBoardAdapter {
         await termsLabel.click({ force: true });
       } else {
         await page.evaluate(() => {
-          const cb = document.querySelector('input[type="checkbox"]') as HTMLInputElement;
-          if (cb) { cb.click(); cb.checked = true; }
+          const inputs = document.querySelectorAll('input[type="checkbox"]');
+          inputs.forEach(cb => { (cb as HTMLInputElement).click(); (cb as HTMLInputElement).checked = true; });
         });
       }
     } catch (e) {

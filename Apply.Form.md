@@ -2,5 +2,6 @@
    - "Email" input: ediigmelchiior@gmail.com
    - "Contacto telefónico" input: +351960211775
    - "CV" file input: /assets/cv.pdf
+   - "CV_ON_SAPOEMPREGO" input: edig_it_2026
    - "Termos" checkbox: checked
    - "ENVIAR CANDIDATURA" button: True

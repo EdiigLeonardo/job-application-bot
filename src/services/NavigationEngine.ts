@@ -29,6 +29,16 @@ export class NavigationEngine {
 
       const browser = await chromium.launch({ headless: false });
       const context = await browser.newContext();
+      
+      // Anti-Adware: Listener global para fechar tabs fora do domínio SAPO (SPEC 2)
+      context.on('page', async (page) => {
+        const url = page.url();
+        if (url !== 'about:blank' && !url.includes('sapo.pt')) {
+          console.log(`[NavigationEngine] Fechando aba externa detectada: ${url}`);
+          await page.close().catch(() => {});
+        }
+      });
+
       const mainPage = await context.newPage();
 
       // Timeout de Navegação conforme SPEC
@@ -44,6 +54,9 @@ export class NavigationEngine {
 
         // Notificação após esgotar keywords
         await this.notificationService.sendDailySummary(applicationsLog);
+        
+        console.log('[NavigationEngine] Ciclo diário concluído com sucesso. Reiniciando processo para limpeza de memória (SPEC 3)...');
+        process.exit(0);
 
       } catch (error) {
         console.error('[NavigationEngine] Erro crítico no motor:', error);
@@ -67,6 +80,8 @@ export class NavigationEngine {
     }
 
     // 1. ENTRY_POINT e Navegação (1.1 ou 1.2)
+    await this.cleanNonSapoTabs(context); // Saneamento Inicial
+    await mainPage.bringToFront();
     await this.sapoAdapter.entryPoint(mainPage, keyword, job);
 
     let hasNextPage = true;
@@ -83,8 +98,17 @@ export class NavigationEngine {
           await job.updateProgress(Math.min(90, 20 + index * 5));
         }
 
+        // Browser Sanity: Garantir máximo de 2 abas (SPEC 1)
+        await this.cleanNonSapoTabs(context);
+        const pages = context.pages();
+        if (pages.length >= 2) {
+           // Se já existe uma aba de detalhe (zombie ou aberta), fecha-a exceto a main
+           for(const p of pages) { if (p !== mainPage) await p.close().catch(() => {}); }
+        }
+
         // Duplicar Tab (preservar lista)
         const detailPage = await context.newPage();
+        await detailPage.bringToFront();
         detailPage.setDefaultNavigationTimeout(30000);
 
         try {
@@ -116,6 +140,21 @@ export class NavigationEngine {
       // Pagination
       hasNextPage = await this.sapoAdapter.goToNextPage(mainPage);
       if (job && hasNextPage) await job.log('Avançando para próxima página...');
+    }
+  }
+
+  /**
+   * SPEC 1: Saneamento de abas (Whitelist sapo.pt)
+   */
+  private async cleanNonSapoTabs(context: BrowserContext) {
+    const pages = context.pages();
+    for (const page of pages) {
+      const url = page.url();
+      // Não fecha se for a página inicial ou se estiver no domínio SAPO
+      if (url !== 'about:blank' && !url.includes('sapo.pt')) {
+        console.log(`[NavigationEngine] Saneamento: Fechando aba ${url}`);
+        await page.close().catch(() => {});
+      }
     }
   }
 
