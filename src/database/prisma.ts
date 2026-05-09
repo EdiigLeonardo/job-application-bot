@@ -5,9 +5,9 @@ import { Pool } from 'pg';
 export const createPrismaClient = (connectionString: string) => {
   const pool = new Pool({ connectionString });
   const adapter = new PrismaPg(pool);
-  // @ts-ignore - Prisma 7 type support
-  return new PrismaClient({
-    adapter,
-    datasourceUrl: connectionString
+
+  // Usar 'any' para evitar erros de tipo durante a transição para Prisma 7 no Edge
+  return new (PrismaClient as any)({
+    adapter
   });
 };

@@ -7,6 +7,7 @@ O bot deve ser resiliente e tentar novamente em caso de erro, e fugir de ads que
     0.4 Verificar se foi autenticado, caso contrário, retornar erro;
 1. Entrar no site https://emprego.sapo.pt/ ou fazer a lógica com https://emprego.sapo.pt/offers?local=${encodeURIComponent(location)}&pesquisa=${encodeURIComponent(keywords)} feita no sapo adapter.ts:
     1.1. Pesquisar as vagas gerais:
+        IMPORTANTE: Sempre verificar se há pop-ups ou anuncios na página e fecha-los antes de qualquer interação. Caso estejamos numa página errada, voltar para https://emprego.sapo.pt/.
         1.1.1 Aceitar todos os cookies;
         1.1.2 Fechar todos anuncios e popups;
         1.1.3 Preencher o de input com o label que contém "palavra-chave" com: "Javascript" [por agora, temos uma lista de palavras-chave];
@@ -18,7 +19,10 @@ O bot deve ser resiliente e tentar novamente em caso de erro, e fugir de ads que
         1.2.3 Obter lista de vagas [https://emprego.sapo.pt/search-results/offers?local=Lisboa&pesquisa=<PalavraChave da vaga que procuramos>];
         1.2.4 Assim que encontramos a vaga duplicamos a tab [para manter a pesquisa na tab original];
     1.3. Candidatar-se a cada vaga:
+    IMPORTANTE: Sempre verificar se há pop-ups ou anuncios na página e fecha-los antes de qualquer interação. Caso estejamos numa página errada, voltar para https://emprego.sapo.pt/.
         1.3.1 No duplicado: Clicar no botão "Candidate-se" da primeira vaga (ps. A primeira vaga é aquela que tiver o primeiro botão de "candidate-se" ou "CANDIDATE-SE", não necessariamente o primeiro botão da página);
+        1.3.1.1 IMPORTANTE: Verificar se existe um texto "Já está registado? Faça aqui o Login ou Registe-se já" , caso exista, clicar no link "Login ou Registe-se já";
+        IMPORTANTE: é mesmo clicar e não ir para a página de login. Nesse ponto o interessante é mesmo clicar no botão ou link que estiver escrito "Login ou Registe-se já" ou algo parecido;
         1.3.2 Assim que entrar-mos na página da vaga, procurar o botão "candidate-se" ou "CANDIDATE-SE" e clicar nele;
         1.3.3 Preencher o formulário com os dados do usuário explicados em Apply.Form.md;
         1.3.4 Ja não iremos fazer upload do CV, apenas preencher o campo correspondente, pelo dropdown de "CV" com o valor de "edig_it_2026" descritos em Apply.Form.md;
@@ -35,6 +39,11 @@ O bot deve ser resiliente e tentar novamente em caso de erro, e fugir de ads que
     - Corpo: "Foram enviadas X candidaturas hoje"
     - Escrever a lista de vagas que foram enviadas.
     - Terminado o processo, o programa deve parar e voltar no dia seguinte no ponto 1.
-    
-    
+
+IMPORTANTE: sempre que o programa estiver a realizar uma ação, verificar se há pop-ups ou anuncios na página e fecha-los antes de qualquer interação. Caso estejamos numa página errada, voltar para https://emprego.sapo.pt/ e continuar o processo de onde parou com  keyword em que estava.
+
+Importante: em caso de erro verificar se o browser/contexto fechou, caso sim reinicar o processo de 0, caso contrário apenas continuar com o processo onde parou.
+
+Importante: guardar o contexto de sessão do browser e não efectuar muitos logins.
+
     

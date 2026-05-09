@@ -19,60 +19,94 @@ export class NavigationEngine {
     while (true) {
       console.log(`[NavigationEngine] Iniciando execução diária: ${new Date().toLocaleString()}`);
 
-      // Healthcheck antes de iniciar conforme SPEC
-      const isHealthy = await this.checkHealth();
-      if (!isHealthy) {
-        console.warn('[NavigationEngine] Healthcheck falhou (Porta 3001 ocupada ou offline). Aguardando 1m...');
-        await new Promise(resolve => setTimeout(resolve, 60000));
-        continue;
-      }
+      let browser: any;
+      let context: any;
+      let mainPage: any;
 
-      const isWorkers = (globalThis as any).process === undefined || (globalThis as any).process.env.NODE_ENV === 'production';
-      let browser;
-      const cfEnv = (this as any).cloudflareEnv; // Injetado via main.ts
-
-      if (cfEnv?.BROWSER) {
-        console.log('[NavigationEngine] Usando Cloudflare Browser Rendering...');
-        browser = await cfEnv.BROWSER.launch();
-      } else {
-        console.log('[NavigationEngine] Usando Chromium Local...');
-        browser = await chromium.launch({ headless: false });
-      }
-
-      const context = await browser.newContext();
-
-      // Anti-Adware: Listener global para fechar tabs fora do domínio SAPO (SPEC 2)
-      context.on('page', async (page: { url: () => any; close: () => Promise<any>; }) => {
-        const url = page.url();
-        if (url !== 'about:blank' && !url.includes('sapo.pt')) {
-          console.log(`[NavigationEngine] Fechando aba externa detectada: ${url}`);
-          await page.close().catch(() => { });
+      const initBrowser = async () => {
+        const cfEnv = (this as any).cloudflareEnv;
+        if (cfEnv?.BROWSER) {
+          console.log('[NavigationEngine] Usando Cloudflare Browser Rendering...');
+          browser = await cfEnv.BROWSER.launch();
+        } else {
+          console.log('[NavigationEngine] Usando Chromium Local...');
+          browser = await chromium.launch({ headless: false });
         }
-      });
+        context = await browser.newContext();
+        
+        // Anti-Adware global listener
+        context.on('page', async (page: any) => {
+          const url = page.url();
+          if (url !== 'about:blank' && !url.includes('sapo.pt')) {
+            console.log(`[NavigationEngine] Fechando aba externa: ${url}`);
+            await page.close().catch(() => {});
+          }
+        });
 
-      const mainPage = await context.newPage();
+        mainPage = await context.newPage();
+        mainPage.setDefaultNavigationTimeout(30000);
+        console.log('[Anchor] Navegando para base: https://emprego.sapo.pt/');
+        await mainPage.goto('https://emprego.sapo.pt/', { waitUntil: 'networkidle' });
+      };
 
-      // Timeout de Navegação conforme SPEC
-      mainPage.setDefaultNavigationTimeout(30000);
-
+      await initBrowser();
       const applicationsLog: any[] = [];
 
       try {
         for (const keyword of keywords) {
-          console.log(`[NavigationEngine] Processando Keyword: ${keyword}`);
-          await this.processKeyword(context, mainPage, keyword, applicationsLog);
+          let attempts = 0;
+          let success = false;
+          const MAX_RETRIES = 3;
+
+          while (attempts < MAX_RETRIES && !success) {
+            attempts++;
+            try {
+              // Validar se o browser/página ainda estão vivos antes de processar (SPEC 1)
+              if (mainPage.isClosed() || browser.isConnected() === false) {
+                throw new Error('Target closed or browser disconnected');
+              }
+
+              console.log(`[NavigationEngine] Processando Keyword: ${keyword} (Tentativa ${attempts}/${MAX_RETRIES})`);
+              
+              if (attempts > 1) {
+                console.log(`[Anchor] Voltando para Home devido a erro na keyword "${keyword}"...`);
+                await mainPage.goto('https://emprego.sapo.pt/', { waitUntil: 'networkidle' });
+              }
+
+              await this.processKeyword(context, mainPage, keyword, applicationsLog);
+              success = true;
+            } catch (error: any) {
+              console.error(`[NavigationEngine] Erro na keyword "${keyword}" (Tentativa ${attempts}):`, error.message);
+              
+              // SPEC 1: Hard Reset se o browser/contexto fechar
+              if (error.message.includes('closed') || error.message.includes('disconnected')) {
+                console.warn('[NavigationEngine] Hard Reset detectado. Reiniciando browser...');
+                await browser.close().catch(() => {});
+                await initBrowser();
+              } else {
+                const pages = context.pages();
+                for (const p of pages) {
+                  if (p !== mainPage && !p.isClosed()) await p.close().catch(() => {});
+                }
+              }
+
+              if (attempts >= MAX_RETRIES) {
+                console.warn(`[Skipped] Keyword "${keyword}" falhou após ${MAX_RETRIES} tentativas.`);
+              } else {
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              }
+            }
+          }
         }
 
-        // Notificação após esgotar keywords
         await this.notificationService.sendDailySummary(applicationsLog);
-
-        console.log('[NavigationEngine] Ciclo diário concluído com sucesso. Reiniciando processo para limpeza de memória (SPEC 3)...');
+        console.log('[NavigationEngine] Ciclo diário concluído. Reiniciando processo (SPEC 3)...');
         process.exit(0);
 
       } catch (error) {
         console.error('[NavigationEngine] Erro crítico no motor:', error);
       } finally {
-        await browser.close();
+        if (browser) await browser.close().catch(() => {});
       }
 
       console.log('[NavigationEngine] Ciclo concluído. Aguardando 24h...');
@@ -95,12 +129,12 @@ export class NavigationEngine {
     await mainPage.bringToFront();
     await this.sapoAdapter.entryPoint(mainPage, keyword, job);
 
-    // Rate Limiting Check (SPEC 2 - NOVO)
-    const limit = parseInt(process.env.NUMBER_OF_JOB_APPLIES_PER_KEYWORD_PER_DAY || '30');
+    // SPEC 1: Consulta de Quota (Prisma Query)
+    const limit = parseInt(process.env.NUMBER_OF_JOB_APPLIES_PER_KEYWORD_PER_DAY || '5', 10);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const countToday = await (this.sapoAdapter as any).prisma.jobApplication.count({
+    let currentAppliedCount = await (this.sapoAdapter as any).prisma.jobApplication.count({
       where: {
         keyword: keyword,
         createdAt: { gte: today },
@@ -108,11 +142,7 @@ export class NavigationEngine {
       }
     });
 
-    if (countToday >= limit) {
-      console.log(`[NavigationEngine] Limite atingido para "${keyword}" (${countToday}/${limit}). Saltando para próxima keyword.`);
-      if (job) await job.log(`Limite diário de ${limit} candidaturas atingido para "${keyword}".`);
-      return;
-    }
+    console.log(`[NavigationEngine] Quota para "${keyword}": ${currentAppliedCount}/${limit}`);
 
     let hasNextPage = true;
     while (hasNextPage) {
@@ -122,6 +152,13 @@ export class NavigationEngine {
       if (job) await job.log(`Encontradas ${jobUrls.length} vagas na página.`);
 
       for (const [index, url] of jobUrls.entries()) {
+        // SPEC 2: Interrupção de Fluxo (Quota Check)
+        if (currentAppliedCount >= limit) {
+          console.log(`[Quota Atingida] Keyword: "${keyword}" atingiu o limite de ${limit} candidaturas hoje.`);
+          if (job) await job.log(`Quota atingida (${limit}). Interrompendo loop de vagas.`);
+          return; // Aborta keyword atual e pula para próxima
+        }
+
         // Anti-Duplicação: Verificar se a jobId (URL) já existe (SPEC 2)
         const alreadyApplied = await (this.sapoAdapter as any).prisma.jobApplication.findUnique({
           where: { jobId: url }
@@ -146,33 +183,56 @@ export class NavigationEngine {
           for (const p of pages) { if (p !== mainPage) await p.close().catch(() => { }); }
         }
 
-        // Duplicar Tab (preservar lista)
+        // SPEC 2: Resiliência por Vaga (Per-Vacancy Retry Logic)
+        let vacancyAttempts = 0;
+        const MAX_VACANCY_RETRIES = 4;
+        let vacancySuccess = false;
+
         const detailPage = await context.newPage();
         await detailPage.bringToFront();
         detailPage.setDefaultNavigationTimeout(30000);
 
-        try {
-          // Transaction Guard: Listener para Diálogos/Popups (SPEC 3)
-          detailPage.on('dialog', async dialog => {
-            console.log(`[NavigationEngine] Diálogo detectado: ${dialog.message()}`);
-            await dialog.dismiss().catch(() => { });
-          });
+        while (vacancyAttempts < MAX_VACANCY_RETRIES && !vacancySuccess) {
+          vacancyAttempts++;
+          try {
+            if (vacancyAttempts === 1) {
+              await detailPage.goto(url, { waitUntil: 'load', timeout: 30000 });
+            } else {
+              console.log(`[NavigationEngine] Retry Vaga (${vacancyAttempts}/${MAX_VACANCY_RETRIES}): ${url}`);
+              await detailPage.reload({ waitUntil: 'load' });
+            }
 
-          await detailPage.goto(url, { waitUntil: 'load', timeout: 30000 });
+            // SPEC 1: Domain Anchor / Whitelist de Fluxo
+            const currentUrl = detailPage.url();
+            const isWhitelisted = ['/offers', '/search-results', '/detalhe', '/candidatura', 'login.sapo.pt'].some(p => currentUrl.includes(p));
+            
+            if (!isWhitelisted && !currentUrl.includes('about:blank')) {
+              console.warn(`[NavigationEngine] URL fora de fluxo detectada: ${currentUrl}. Fazendo reset...`);
+              await detailPage.close().catch(() => {});
+              vacancySuccess = false; 
+              break; // Aborta esta vaga e tenta a próxima (ou retry da keyword)
+            }
 
-          // Executar 1.3 (Application)
-          const success = await this.sapoAdapter.applyToJobSpec(detailPage, job, keyword);
+            await detailPage.keyboard.press('Escape'); // SPEC 3: Anti-Stuck Ads
 
-          if (success) {
-            log.push({ url, title: 'Vaga Sapo', company: 'Check DB', location: 'Lisboa' });
-            await detailPage.close(); // SPEC 1: SÓ FECHA EM SUCESSO
-          } else {
-            console.warn(`[NavigationEngine] Candidatura interrompida para ${url}. Tab mantida aberta para inspeção.`);
-            if (job) await job.log(`AVISO: Verifique a tab aberta para a vaga ${url}`);
+            // Executar 1.3 (Application)
+            vacancySuccess = await this.sapoAdapter.applyToJobSpec(detailPage, job, keyword);
+
+            if (vacancySuccess) {
+              currentAppliedCount++;
+              log.push({ url, title: 'Vaga Sapo', company: 'Check DB', location: 'Lisboa' });
+              if (job) await job.log(`Candidatura ${currentAppliedCount}/${limit} enviada com sucesso.`);
+              await detailPage.close();
+            }
+          } catch (err: any) {
+            console.error(`[NavigationEngine] Erro na vaga (Tentativa ${vacancyAttempts}):`, err.message);
+            if (vacancyAttempts >= MAX_VACANCY_RETRIES) {
+              if (job) await job.log(`[Skipped] Vaga falhou após ${MAX_VACANCY_RETRIES} tentativas.`);
+              await detailPage.close();
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
           }
-        } catch (err: any) {
-          console.error(`[NavigationEngine] Erro crítico na vaga ${url}:`, err);
-          if (job) await job.log(`ERRO CRÍTICO: ${err.message}. Tab mantida aberta.`);
         }
         // Nota: Removido o close do finally para respeitar a SPEC de Transaction Guard
       }

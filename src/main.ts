@@ -13,6 +13,19 @@ async function getApp(): Promise<INestApplication> {
   return cachedApp;
 }
 
+/**
+ * Suporte para execução local (Node.js) via 'npm run dev'
+ */
+if (typeof process !== 'undefined' && process.env && !process.env.CF_PAGES) {
+  async function bootstrap() {
+    const app = await NestFactory.create(AppModule);
+    const port = process.env.PORT || 3001;
+    await app.listen(port);
+    console.log(`[Local] Aplicação iniciada na porta ${port}`);
+  }
+  bootstrap().catch(err => console.error('[Local] Erro ao iniciar:', err));
+}
+
 export default {
   /**
    * Handler principal para requisições HTTP (API/Webhooks)
@@ -35,7 +48,6 @@ export default {
     (app as any).cloudflareEnv = env;
     
     console.log('[Workers] Executando ciclo diário de candidaturas...');
-    // Aqui invocamos o serviço de automação
     const navigationEngine = app.get('NavigationEngine');
     ctx.waitUntil(navigationEngine.runDailyCycle());
   }
