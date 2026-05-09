@@ -27,15 +27,26 @@ export class NavigationEngine {
         continue;
       }
 
-      const browser = await chromium.launch({ headless: false });
+      const isWorkers = (globalThis as any).process === undefined || (globalThis as any).process.env.NODE_ENV === 'production';
+      let browser;
+      const cfEnv = (this as any).cloudflareEnv; // Injetado via main.ts
+
+      if (cfEnv?.BROWSER) {
+        console.log('[NavigationEngine] Usando Cloudflare Browser Rendering...');
+        browser = await cfEnv.BROWSER.launch();
+      } else {
+        console.log('[NavigationEngine] Usando Chromium Local...');
+        browser = await chromium.launch({ headless: false });
+      }
+
       const context = await browser.newContext();
-      
+
       // Anti-Adware: Listener global para fechar tabs fora do domínio SAPO (SPEC 2)
-      context.on('page', async (page) => {
+      context.on('page', async (page: { url: () => any; close: () => Promise<any>; }) => {
         const url = page.url();
         if (url !== 'about:blank' && !url.includes('sapo.pt')) {
           console.log(`[NavigationEngine] Fechando aba externa detectada: ${url}`);
-          await page.close().catch(() => {});
+          await page.close().catch(() => { });
         }
       });
 
@@ -54,7 +65,7 @@ export class NavigationEngine {
 
         // Notificação após esgotar keywords
         await this.notificationService.sendDailySummary(applicationsLog);
-        
+
         console.log('[NavigationEngine] Ciclo diário concluído com sucesso. Reiniciando processo para limpeza de memória (SPEC 3)...');
         process.exit(0);
 
@@ -84,6 +95,25 @@ export class NavigationEngine {
     await mainPage.bringToFront();
     await this.sapoAdapter.entryPoint(mainPage, keyword, job);
 
+    // Rate Limiting Check (SPEC 2 - NOVO)
+    const limit = parseInt(process.env.NUMBER_OF_JOB_APPLIES_PER_KEYWORD_PER_DAY || '30');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const countToday = await (this.sapoAdapter as any).prisma.jobApplication.count({
+      where: {
+        keyword: keyword,
+        createdAt: { gte: today },
+        status: 'APPLIED'
+      }
+    });
+
+    if (countToday >= limit) {
+      console.log(`[NavigationEngine] Limite atingido para "${keyword}" (${countToday}/${limit}). Saltando para próxima keyword.`);
+      if (job) await job.log(`Limite diário de ${limit} candidaturas atingido para "${keyword}".`);
+      return;
+    }
+
     let hasNextPage = true;
     while (hasNextPage) {
       // 1.2 Processamento de Vagas na página atual
@@ -92,6 +122,16 @@ export class NavigationEngine {
       if (job) await job.log(`Encontradas ${jobUrls.length} vagas na página.`);
 
       for (const [index, url] of jobUrls.entries()) {
+        // Anti-Duplicação: Verificar se a jobId (URL) já existe (SPEC 2)
+        const alreadyApplied = await (this.sapoAdapter as any).prisma.jobApplication.findUnique({
+          where: { jobId: url }
+        });
+
+        if (alreadyApplied && alreadyApplied.status === 'APPLIED') {
+          console.log(`[NavigationEngine] Vaga já aplicada anteriormente: ${url}. Ignorando.`);
+          continue;
+        }
+
         // Heartbeat por vaga
         if (job) {
           await job.log(`Processando vaga ${index + 1}/${jobUrls.length}: ${url}`);
@@ -102,8 +142,8 @@ export class NavigationEngine {
         await this.cleanNonSapoTabs(context);
         const pages = context.pages();
         if (pages.length >= 2) {
-           // Se já existe uma aba de detalhe (zombie ou aberta), fecha-a exceto a main
-           for(const p of pages) { if (p !== mainPage) await p.close().catch(() => {}); }
+          // Se já existe uma aba de detalhe (zombie ou aberta), fecha-a exceto a main
+          for (const p of pages) { if (p !== mainPage) await p.close().catch(() => { }); }
         }
 
         // Duplicar Tab (preservar lista)
@@ -121,7 +161,7 @@ export class NavigationEngine {
           await detailPage.goto(url, { waitUntil: 'load', timeout: 30000 });
 
           // Executar 1.3 (Application)
-          const success = await this.sapoAdapter.applyToJobSpec(detailPage, job);
+          const success = await this.sapoAdapter.applyToJobSpec(detailPage, job, keyword);
 
           if (success) {
             log.push({ url, title: 'Vaga Sapo', company: 'Check DB', location: 'Lisboa' });
@@ -153,7 +193,7 @@ export class NavigationEngine {
       // Não fecha se for a página inicial ou se estiver no domínio SAPO
       if (url !== 'about:blank' && !url.includes('sapo.pt')) {
         console.log(`[NavigationEngine] Saneamento: Fechando aba ${url}`);
-        await page.close().catch(() => {});
+        await page.close().catch(() => { });
       }
     }
   }

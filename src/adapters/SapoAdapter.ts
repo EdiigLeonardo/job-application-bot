@@ -106,7 +106,7 @@ export class SapoAdapter implements JobBoardAdapter {
   /**
    * 1.3 (Candidatura & Form)
    */
-  async applyToJobSpec(page: Page, job?: Job): Promise<boolean> {
+  async applyToJobSpec(page: Page, job?: Job, keyword?: string): Promise<boolean> {
     console.log('[Sapo][SapoAdapter][applyToJobSpec] Step 1.3: Iniciando...')
     await this.handlePopups(page);
 
@@ -189,6 +189,7 @@ export class SapoAdapter implements JobBoardAdapter {
           platform: 'SapoEmprego',
           title: title,
           company: company,
+          keyword: keyword,
           status: 'APPLIED'
         }
       });
@@ -398,6 +399,6 @@ export class SapoAdapter implements JobBoardAdapter {
   }
 
   async applyToJob(page: Page, jobId: string, aiSummary: string, job?: Job): Promise<boolean> {
-    return this.applyToJobSpec(page, job);
+    return this.applyToJobSpec(page, job, 'manual_apply');
   }
 }
