@@ -1,9 +1,10 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -23,6 +24,7 @@ model JobApplication {
   relevanceReason String?  // Explicação por que a IA sugeriu
   feedback        String?  // INTERVIEW, REJECTED, IGNORED
   status          String   @default("SCRAPED")
+  keyword         String?  // The keyword used for this application
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
