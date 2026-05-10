@@ -1,0 +1,14 @@
+{
+  "name": "sapo-bot-backend",
+  "main": "src/main.ts",
+  "compatibility_date": "2024-05-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "vars": {
+    "NODE_ENV": "production"
+  }
+}

@@ -4,6 +4,8 @@ import { JobBoardAdapter, ScrapedJob } from '../interfaces/JobBoardAdapter';
 import { IntelligenceService } from '../services/IntelligenceService';
 import { Job } from 'bullmq';
 import * as dotenv from 'dotenv';
+import * as path from 'path';
+
 import { createPrismaClient } from '../database/prisma';
 
 dotenv.config();
@@ -37,12 +39,14 @@ export class SapoAdapter implements JobBoardAdapter {
     console.log('[Sapo][SapoAdapter][step11InitialNavigation] Step 1.1: Navegação inicial...');
     await page.goto('https://emprego.sapo.pt/', { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Saneamento de DOM (SPEC 2)
+    // SPEC 2: Saneamento de DOM (Remover banners de alto impacto)
     await page.addStyleTag({ content: '#sapoHighImpact, .qc-cmp2-container, #sapo-high-impact { display: none !important; }' });
 
+    // Race Condition: Aceitar Cookies com timeout curto (2s)
+    if (job) await job.log('Step 1.1: Gerindo cookies e popups...');
     await page.waitForSelector('#qc-cmp2-ui button[mode="primary"]', { timeout: 2000 }).then(async (el) => {
       await el.click();
-    }).catch(() => {});
+    }).catch(() => { });
 
     await this.handlePopups(page);
 
@@ -56,18 +60,26 @@ export class SapoAdapter implements JobBoardAdapter {
 
     // Dropdown: Selecionar "Lisboa" (SPEC 2: Force Bypass + JS Fallback)
     await page.click('button.ink-button:has-text("Distrito"), button.ink-button:has-text("Lisboa")');
+
     try {
       await page.locator('label[for="dest11"]').click({ force: true, timeout: 5000 });
     } catch (e) {
+      console.log('[Sapo] Clique forçado falhou, tentando via JS Fallback...');
       await page.evaluate(() => (document.querySelector('label[for="dest11"]') as HTMLElement)?.click());
     }
 
+    if (job) await job.updateProgress(15);
+
+    // Trigger: Promise.race entre o botão e popups inesperados
+    if (job) await job.log('Step 1.1: Clicando em PROCURAR...');
     await Promise.race([
       page.click('button.ink-button.main-action:has-text("PROCURAR")'),
       page.waitForSelector('.ink-button.close-highimpact', { timeout: 10000 }).then(el => el.click())
     ]).catch(() => { });
 
-    await page.waitForSelector('article h3 a', { timeout: 30000 }).catch(() => {});
+    await page.waitForSelector('article h3 a', { timeout: 30000 }).catch(() => {
+      console.warn('[Sapo] Timeout aguardando resultados da pesquisa. Verificando se a página carregou...');
+    });
   }
 
   async getJobUrls(page: Page): Promise<string[]> {
@@ -78,7 +90,11 @@ export class SapoAdapter implements JobBoardAdapter {
     return links;
   }
 
+  /**
+   * 1.3 (Candidatura & Form)
+   */
   async applyToJobSpec(page: Page, job?: Job, keyword?: string): Promise<boolean> {
+    console.log('[Sapo][SapoAdapter][applyToJobSpec] Step 1.3: Iniciando...')
     await this.handlePopups(page);
 
     const applyButton = page.locator('text=/CANDIDATE-SE/i').first();
@@ -91,6 +107,25 @@ export class SapoAdapter implements JobBoardAdapter {
       await applyButton.click({ force: true });
     }
 
+    // Verificação de Domínio (SPEC 4 & Domain Anchor)
+    try {
+      const currentUrl = page.url();
+      if (currentUrl.includes('login.sapo.pt')) {
+        console.warn('[Sapo] Redirecionamento inesperado para Login detectado. Sinalizando erro de sessão.');
+        return false; // O retry da vaga cuidará do reload/reset
+      }
+
+      await page.waitForSelector('.main-content, #content, body', { timeout: 5000 });
+      if (!currentUrl.includes('sapo.pt')) throw new Error('Fora do domínio SAPO');
+    } catch (e) {
+      await page.goto('https://emprego.sapo.pt/');
+      return false;
+    }
+
+    // Aguardar o formulário aparecer (basta o seletor crítico)
+    await page.waitForSelector('#nome, input[name*="nome"]', { timeout: 10000 })
+      .catch(() => console.log('[Sapo] Aviso: Formulário não detetado imediatamente.'));
+
     // SPEC 1: Verificação Condicional (Mid-Flight Auth)
     try {
       const loginRequired = page.locator('text=/Login ou Registe-se já/i').first();
@@ -98,7 +133,8 @@ export class SapoAdapter implements JobBoardAdapter {
         console.log('[Auth] Login in-page detectado e acionado. Forçando refresh de sessão...');
         await loginRequired.click();
         await page.waitForLoadState('networkidle');
-        
+
+        // Validar se o formulário ficou disponível após o clique
         const formVisible = await page.locator('#nome, input[name*="nome"]').isVisible({ timeout: 5000 });
         if (!formVisible) {
           console.warn('[Auth] Formulário ainda indisponível após clique in-page. Tentando reload...');
@@ -107,20 +143,7 @@ export class SapoAdapter implements JobBoardAdapter {
       }
     } catch (e) { }
 
-    // Verificação de Domínio (SPEC 4 & Domain Anchor)
-    try {
-      const currentUrl = page.url();
-      if (currentUrl.includes('login.sapo.pt')) {
-        console.warn('[Sapo] Redirecionamento inesperado para Login detectado.');
-        return false;
-      }
-      await page.waitForSelector('.main-content, #content, body', { timeout: 5000 });
-      if (!currentUrl.includes('sapo.pt')) throw new Error('Fora do domínio SAPO');
-    } catch (e) {
-      await page.goto('https://emprego.sapo.pt/');
-      return false; 
-    }
-
+    // Extrair metadados para persistência
     const title = await page.locator('h1').first().innerText().catch(() => 'Vaga Sapo');
     const company = await page.locator('.company-name').first().innerText().catch(() => 'Empresa Sapo');
 
@@ -150,10 +173,10 @@ export class SapoAdapter implements JobBoardAdapter {
         create: {
           jobId: page.url(),
           platform: 'SapoEmprego',
-          title,
-          company,
-          status: 'APPLIED',
-          keyword
+          title: title,
+          company: company,
+          keyword: keyword,
+          status: 'APPLIED'
         }
       });
 
@@ -163,11 +186,17 @@ export class SapoAdapter implements JobBoardAdapter {
     }
   }
 
+  /**
+   * SPEC 0: Autenticação Persistente
+   */
   async ensureAuthenticated(page: Page, job?: Job, forceReset = false) {
     if (forceReset) {
+      console.log('[Sapo][Auth] Forçando reset de sessão (Clear Cookies)...');
       await page.context().clearCookies();
     }
 
+    console.log('[Sapo][Auth] Verificando sessão...');
+    // SPEC 1: Se já estiver na página com cookies/sessão, não redireciona
     const isLogged = await page.locator('a:has-text("Sair"), .user-profile').count() > 0;
     if (isLogged) return;
 
@@ -175,8 +204,8 @@ export class SapoAdapter implements JobBoardAdapter {
 
     await page.fill('input#username, input[type="email"]', process.env.SAPO_AUTH_EMAIL || '');
     await page.click('button:has-text("Continuar"), #submit-btn');
-    
-    await page.fill('input#password, input[type="password"]', process.env.SAPO_AUTH_PASSWORD || '');
+
+    await page.fill('input#password, input[name="password"], input[type="password"]', process.env.SAPO_AUTH_PASSWORD || '');
     await page.click('button:has-text("Continuar"), #submit-btn');
 
     await page.waitForLoadState('networkidle');
@@ -186,7 +215,8 @@ export class SapoAdapter implements JobBoardAdapter {
     const closeSelectors = ['button:has-text("Fechar")', '.ink-button.close-highimpact', '#fechar-x'];
     for (const selector of closeSelectors) {
       await page.addLocatorHandler(page.locator(selector).first(), async () => {
-        await page.locator(selector).first().click().catch(() => {});
+        console.log(`[Sapo][Anti-Ads] Fechando popup detectado: ${selector}`);
+        await page.locator(selector).first().click().catch(() => { });
       });
     }
   }
@@ -228,18 +258,30 @@ export class SapoAdapter implements JobBoardAdapter {
     for (const s of selectors) {
       try {
         const btn = page.locator(s).first();
-        if (await btn.isVisible()) await btn.click({ timeout: 1000 }).catch(() => {});
-      } catch (e) {}
-    }
+        if (await btn.isVisible()) {
+          await btn.click({ timeout: 1000 }).catch(() => { });
+        }
+      } catch (e) { }
+    }));
   }
 
   private async waitForCaptcha(page: Page) {
     await page.waitForFunction(() => {
       const res = (document.getElementsByName('h-captcha-response')[0] as any);
       return res && res.value !== '';
-    }, { timeout: 120000 }).catch(() => {});
+    }, { timeout: 120000 }).catch(() => {
+      console.log('[Sapo] Timeout aguardando resolução de Captcha.');
+    });
   }
 
-  async scrapeJobs(page: Page, keywords: string, location: string): Promise<ScrapedJob[]> { return []; }
-  async applyToJob(page: Page, jobId: string, aiSummary: string, job?: Job): Promise<boolean> { return this.applyToJobSpec(page, job); }
+  /**
+   * Implementação da Interface JobBoardAdapter (Compatibilidade)
+   */
+  async scrapeJobs(page: Page, keywords: string, location: string): Promise<ScrapedJob[]> {
+    return []; // Novo fluxo usa getJobUrls diretamente
+  }
+
+  async applyToJob(page: Page, jobId: string, aiSummary: string, job?: Job): Promise<boolean> {
+    return this.applyToJobSpec(page, job, 'manual_apply');
+  }
 }
